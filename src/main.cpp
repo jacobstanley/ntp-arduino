@@ -138,12 +138,15 @@ static void pps_loop()
 static byte mac_address[] = { 0x74,0x69,0x69,0x2D,0x30,0x32 };
 static byte ip_address[] = { 1,1,1,100 };
 
-byte Ethernet::buffer[550];
+#define ETHERNET_BUFFER_SIZE 550
+byte Ethernet::buffer[ETHERNET_BUFFER_SIZE];
+
+#define ETHERNET_CS_PIN 10
 
 static void ethernet_setup()
 {
-    if (ether.begin(sizeof Ethernet::buffer, mac_address, 10) == 0)
-        Serial.println( "Failed to access Ethernet controller");
+    if (!ether.begin(ETHERNET_BUFFER_SIZE, mac_address, ETHERNET_CS_PIN))
+        Serial.println("Failed to access Ethernet controller");
 
     ether.staticSetup(ip_address);
 }
@@ -249,8 +252,8 @@ static word build_http_response(word request)
 
 static void http_loop()
 {
-    word plen    = ether.packetReceive();
-    word request = ether.packetLoop(plen);
+    word length  = ether.packetReceive();
+    word request = ether.packetLoop(length);
 
     if (request)
     {
