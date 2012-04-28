@@ -72,7 +72,6 @@ static void gps_loop()
 {
     bool newData = false;
     unsigned long chars;
-    unsigned short sentences, failed;
 
     while (gps_serial.available())
     {
@@ -169,7 +168,7 @@ static int get_free_memory()
     return free_memory;
 }
 
-static char* print_dms(float degrees, char* buf)
+static char* print_dms(float degrees, char* buffer)
 {
     float fValue = fabs(degrees);
     int deg = (int) fValue;
@@ -182,84 +181,101 @@ static char* print_dms(float degrees, char* buf)
     remainder = fValue- secs;
     fValue = remainder *1000;
     int ptSec = (int) fValue;
-    sprintf(buf, "%d:%d:%d.%d",deg,mins,secs, ptSec);
 
-    return buf;
+    sprintf(buffer, "%d:%d:%d.%d", deg, mins, secs, ptSec);
+
+    return buffer;
 }
 
-static char* print_ms_time(long ms, char* buf)
+static char* print_ms_time(long ms, char* buffer)
 {
-    long t = ms / 1000;
-    word h = t / 3600;
-    byte m = (t / 60) % 60;
-    byte s = t % 60;
-    byte ss= (ms % 1000)/100;
-    sprintf(buf, "%d%d:%0d%d:%d%d.%d", h/10, h%10, m/10, m%10, s/10, s%10, ss );
-    return buf;
+    long t  = ms / 1000;
+    word h  = t / 3600;
+    byte m  = (t / 60) % 60;
+    byte s  = t % 60;
+    byte ss = (ms % 1000)/100;
+
+    sprintf(buffer, "%d%d:%0d%d:%d%d.%d",
+        h/10, h%10, m/10, m%10, s/10, s%10, ss);
+
+    return buffer;
+}
+
+static char* print_gps_time(char *buffer)
+{
+    int year;
+    byte month, day, hour, minute, second, hundredths;
+
+    gps.crack_datetime(
+        &year, &month, &day,
+        &hour, &minute, &second, &hundredths);
+
+    sprintf(buffer, "%d:%d:%d %d:%d:%d.%02d",
+        year, month, day,
+        hour, minute, second, hundredths);
 }
 
 ////////////////////////////////////////////////////////////////////////
 // Web Server
 
-static char printBuf[16];
-
-static word build_http_response(word request)
+static void write_status_page(BufferFiller &response)
 {
-    BufferFiller bfill = ether.tcpOffset();
+    char buffer[32];
 
-    char* data = (char *) Ethernet::buffer + request;
-#if SERIAL
-    Serial.println(data);
-#endif
-    // receive buf hasn't been clobbered by reply yet
-    if (strncmp("GET /c", data, 6) == 0)      //calibration details
-    {
-        bfill = ether.tcpOffset();
-        bfill.emit_p(PSTR(
-                    "HTTP/1.0 200 OK\r\n"
-                    "Content-Type: text/html\r\n"
-                    "Pragma: no-cache\r\n"
-                    "\r\n"
-                    "<meta http-equiv='refresh' content='1'/>"
-                    "<title>Enchantee Log</title>"));
-    }
-    else  //general home page
-    {
-        bfill.emit_p(PSTR(
-                    "HTTP/1.0 200 OK\r\n"
-                    "Content-Type: text/html\r\n"
-                    "Pragma: no-cache\r\n"
-                    "\r\n"
-                    "<meta http-equiv='refresh' content='1'/>"
-                    "<title>Enchantee Log</title>"));
+    response.emit_p(PSTR(
+        "HTTP/1.0 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Pragma: no-cache\r\n"
+        "\r\n"
+        "<meta http-equiv='refresh' content='1'/>"
+        "<title>Enchantee Log</title>"));
 
-        print_dms(g_latitude, printBuf);
-        bfill.emit_p(PSTR("<h1>Lat $S<h1>"), printBuf );
-        print_dms(g_longitude, printBuf);
-        bfill.emit_p(PSTR("<h1>Lon $S<h1>"), printBuf );
-        bfill.emit_p(PSTR("<h1>Speed $D.$D</h1>"), (int)g_speed, (int)((g_speed-(int)g_speed)*10) );
-        bfill.emit_p(PSTR("<h1>Course $D.$D</h1>"), (int)g_course, (int)((g_course - (int)g_course)*10) );
-        bfill.emit_p(PSTR("<h1>Satellites $D</h1>"), gps.satellites() == TinyGPS::GPS_INVALID_SATELLITES ? 0 : gps.satellites() );
-        int hDop = gps.hdop() == TinyGPS::GPS_INVALID_HDOP ? 0 : gps.hdop();
-        bfill.emit_p(PSTR("<h1>Horz DOP $D.$D</h1>"), (int)hDop/100, (int)((hDop/100.0 - (int)(hDop/100))*100));
-    }
-    bfill.emit_p(PSTR("Running $S\n"), print_ms_time(millis(), printBuf));
-    bfill.emit_p(PSTR("Free mem $D\n"), get_free_memory() );
-    bfill.emit_p(PSTR("Since PPS $S\n"), print_ms_time(millis()-g_time_pps, printBuf));
+    print_gps_time(buffer);
+    response.emit_p(PSTR("<h1>UTC $S<h1>"), buffer);
 
-    return bfill.position();
+    print_dms(g_latitude, buffer);
+    response.emit_p(PSTR("<h1>Lat $S<h1>"), buffer);
+
+    print_dms(g_longitude, buffer);
+    response.emit_p(PSTR("<h1>Lon $S<h1>"), buffer);
+
+    unsigned short sats = gps.satellites();
+    response.emit_p(PSTR("<h1>Satellites $D</h1>"),
+        sats == TinyGPS::GPS_INVALID_SATELLITES ? 0 : sats);
+
+    response.emit_p(PSTR("Running $S\n"), print_ms_time(millis(), buffer));
+    response.emit_p(PSTR("Free mem $D\n"), get_free_memory() );
+    response.emit_p(PSTR("Since PPS $S\n"), print_ms_time(millis()-g_time_pps, buffer));
+
+}
+
+// NOTE: The request and response share the same underlying buffer, so
+// NOTE: make sure you don't access the request after you start writing
+// NOTE: the response.
+static word process_http_request(const char *request, BufferFiller &response)
+{
+    //Serial.println(request);
+    write_status_page(response);
 }
 
 static void http_loop()
 {
-    word length  = ether.packetReceive();
-    word request = ether.packetLoop(length);
+    word len = ether.packetReceive();
+    word pos = ether.packetLoop(len);
 
-    if (request)
+    if (!pos)
     {
-        word response = build_http_response(request);
-        ether.httpServerReply(response);
+        return;
     }
+
+    const char *request   = (const char *)Ethernet::buffer + pos;
+    BufferFiller response = ether.tcpOffset();
+
+    // Process the request and build the response.
+    process_http_request(request, response);
+
+    // Send the response to the client.
+    ether.httpServerReply(response.position());
 }
 
 ////////////////////////////////////////////////////////////////////////
