@@ -1,0 +1,37 @@
+require 'rake/clean'
+
+CLOBBER.include('build/')
+PROJECT  = 'ntp'
+MAKEFILE = 'build/Makefile'
+OUTPUT   = "build/#{PROJECT}.elf"
+
+task :default => :upload
+
+task :rebuild => [:clean, :upload]
+
+task :make => OUTPUT
+
+task :upload => OUTPUT do
+  cd 'build' do
+    sh "make #{PROJECT}-upload"
+  end
+end
+
+task :configure => MAKEFILE
+
+task :clean do
+  rm_rf 'build'
+end
+
+file MAKEFILE do
+  mkdir 'build'
+  cd 'build' do
+    sh 'cmake ..'
+  end
+end
+
+file OUTPUT => MAKEFILE do
+  cd 'build' do
+    sh "make #{PROJECT}"
+  end
+end
