@@ -1,13 +1,14 @@
 require 'rake/clean'
 
-CLOBBER.include('build/')
+CLEAN.include('build/', 'tags')
+CLOBBER.include('libtags')
 PROJECT  = 'ntp'
 MAKEFILE = 'build/Makefile'
 OUTPUT   = "build/#{PROJECT}.elf"
 
-task :default => :upload
+task :default => [:tags, :upload]
 
-task :rebuild => [:clean, :upload]
+task :rebuild => [:clean, :tags, :upload]
 
 task :make => OUTPUT
 
@@ -18,10 +19,6 @@ task :upload => OUTPUT do
 end
 
 task :configure => MAKEFILE
-
-task :clean do
-  rm_rf 'build'
-end
 
 file MAKEFILE do
   mkdir 'build'
@@ -34,4 +31,15 @@ file OUTPUT => MAKEFILE do
   cd 'build' do
     sh "make #{PROJECT}"
   end
+end
+
+file 'libtags' do
+  sh 'ctags -f libtags --tag-relative --extra=+fq -R --exclude=numpy /usr/include/'
+  sh 'ctags -f libtags --tag-relative --extra=+fq -R -a /usr/lib/avr/include/'
+  sh 'ctags -f libtags --tag-relative --extra=+fq -R -a ~/arduino-1.0/hardware/arduino/cores/arduino/'
+  sh 'ctags -f libtags --tag-relative --extra=+fq -R -a ~/arduino-1.0/libraries/'
+end
+
+task :tags => 'libtags' do
+  sh 'ctags -f tags --tag-relative --extra=+fq -R ./src/'
 end
