@@ -76,7 +76,7 @@ static void gps_loop()
     while (gps_serial.available())
     {
         char c = gps_serial.read();
-        Serial.write(c);
+        //Serial.write(c);
 
         if (gps.encode(c)) // Did a new valid sentence come in?
         {
@@ -128,26 +128,6 @@ static void pps_loop()
 {
     int pps_state = millis() - g_time_pps < 100 ? HIGH : LOW;
     digitalWrite(LED_PIN, pps_state);
-}
-
-////////////////////////////////////////////////////////////////////////
-// Ethernet
-
-// MAC address must be unique on the LAN.
-static byte mac_address[] = { 0x74,0x69,0x69,0x2D,0x30,0x32 };
-static byte ip_address[] = { 1,1,1,100 };
-
-#define ETHERNET_BUFFER_SIZE 550
-byte Ethernet::buffer[ETHERNET_BUFFER_SIZE];
-
-#define ETHERNET_CS_PIN 10
-
-static void ethernet_setup()
-{
-    if (!ether.begin(ETHERNET_BUFFER_SIZE, mac_address, ETHERNET_CS_PIN))
-        Serial.println("Failed to access Ethernet controller");
-
-    ether.staticSetup(ip_address);
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -210,7 +190,7 @@ static char* print_gps_time(char *buffer)
         &year, &month, &day,
         &hour, &minute, &second, &hundredths);
 
-    sprintf(buffer, "%d:%d:%d %d:%d:%d.%02d",
+    sprintf(buffer, "%d-%02d-%02d %02d:%02d:%02d.%02d",
         year, month, day,
         hour, minute, second, hundredths);
 }
@@ -243,10 +223,15 @@ static void write_status_page(BufferFiller &response)
     response.emit_p(PSTR("<h1>Satellites $D</h1>"),
         sats == TinyGPS::GPS_INVALID_SATELLITES ? 0 : sats);
 
-    response.emit_p(PSTR("Running $S\n"), print_ms_time(millis(), buffer));
-    response.emit_p(PSTR("Free mem $D\n"), get_free_memory() );
-    response.emit_p(PSTR("Since PPS $S\n"), print_ms_time(millis()-g_time_pps, buffer));
+    response.emit_p(PSTR("Running $S\n"),
+        print_ms_time(millis(), buffer));
 
+    response.emit_p(PSTR("Free mem $D\n"),
+        get_free_memory() );
+
+    long time_since_pps = millis() - g_time_pps;
+    response.emit_p(PSTR("Since PPS $S\n"),
+        print_ms_time(time_since_pps, buffer));
 }
 
 // NOTE: The request and response share the same underlying buffer, so
@@ -258,17 +243,9 @@ static word process_http_request(const char *request, BufferFiller &response)
     write_status_page(response);
 }
 
-static void http_loop()
+static void http_loop(word pos)
 {
-    word len = ether.packetReceive();
-    word pos = ether.packetLoop(len);
-
-    if (!pos)
-    {
-        return;
-    }
-
-    const char *request   = (const char *)Ethernet::buffer + pos;
+    const char *request   = (const char *)ether.buffer + pos;
     BufferFiller response = ether.tcpOffset();
 
     // Process the request and build the response.
@@ -276,6 +253,155 @@ static void http_loop()
 
     // Send the response to the client.
     ether.httpServerReply(response.position());
+}
+
+////////////////////////////////////////////////////////////////////////
+// Ethernet Utils
+
+#define gPB ether.buffer
+
+inline static uint8_t read_uint8(size_t offset)
+{
+    return gPB[offset];
+}
+
+static uint16_t read_uint16(size_t offset)
+{
+    return ((uint16_t)gPB[offset + 0] << 8) |
+            (uint16_t)gPB[offset + 1];
+}
+
+static uint32_t read_uint32(size_t offset)
+{
+    return ((uint32_t)gPB[offset + 0] << 24) |
+           ((uint32_t)gPB[offset + 1] << 16) |
+           ((uint32_t)gPB[offset + 2] <<  8)  |
+            (uint32_t)gPB[offset + 3];
+}
+
+static bool packet_is_udp(word len)
+{
+    return len >= 42
+        && gPB[ETH_TYPE_H_P] == ETHTYPE_IP_H_V
+        && gPB[ETH_TYPE_L_P] == ETHTYPE_IP_L_V
+        && gPB[IP_HEADER_LEN_VER_P] == 0x45
+        && gPB[IP_PROTO_P] == IP_PROTO_UDP_V;
+}
+
+static bool udp_dst_port_is(uint8_t port)
+{
+    return gPB[UDP_DST_PORT_H_P] == 0
+        && gPB[UDP_DST_PORT_L_P] == port;
+}
+
+////////////////////////////////////////////////////////////////////////
+// NTP Server
+
+#define NTP_PORT 123
+#define NTP_MIN_LEN 56
+
+#define NTP_FLAGS_P           (UDP_DATA_P + 0)
+#define NTP_STRATUM_P         (UDP_DATA_P + 1)
+#define NTP_POLL_P            (UDP_DATA_P + 2)
+#define NTP_PRECISION_P       (UDP_DATA_P + 3)
+#define NTP_ROOT_DELAY_P      (UDP_DATA_P + 4)
+#define NTP_ROOT_DISPERSION_P (UDP_DATA_P + 8)
+#define NTP_REFERENCE_ID_P    (UDP_DATA_P + 12)
+#define NTP_REFERENCE_TIME_P  (UDP_DATA_P + 16)
+#define NTP_TIME1_P           (UDP_DATA_P + 24)
+#define NTP_TIME2_P           (UDP_DATA_P + 32)
+#define NTP_TIME3_P           (UDP_DATA_P + 48)
+
+static void read_flags(uint8_t *leap_indicator, uint8_t *version, uint8_t *mode)
+{
+    uint8_t flags = read_uint8(NTP_FLAGS_P);
+
+    *leap_indicator = flags >> 6;
+    *version        = (flags & 0x38) >> 3;
+    *mode           = (flags & 0x7);
+}
+
+static void ntp_loop()
+{
+    if (!udp_dst_port_is(NTP_PORT)) return;
+
+    word len = read_uint16(UDP_LEN_H_P);
+
+    if (len < NTP_MIN_LEN) return;
+
+    Serial.println();
+    Serial.println("Received NTP Packet");
+
+    ether.printIp("src.ip = ", &gPB[IP_SRC_P]);
+    Serial.print("src.port = ");
+    Serial.println(read_uint16(UDP_SRC_PORT_H_P));
+
+    ether.printIp("dst.ip = ", &gPB[IP_DST_P]);
+    Serial.print("dst.port = ");
+    Serial.println(read_uint16(UDP_DST_PORT_H_P));
+
+    uint8_t leap, version, mode;
+    read_flags(&leap, &version, &mode);
+    Serial.print("ntp.leap_indicator = ");
+    Serial.println(leap);
+    Serial.print("ntp.version = ");
+    Serial.println(version);
+    Serial.print("ntp.mode = ");
+    Serial.println(mode);
+
+    Serial.print("ntp.stratum = ");
+    Serial.println(read_uint8(NTP_STRATUM_P));
+    Serial.print("ntp.poll = ");
+    Serial.println(read_uint8(NTP_POLL_P));
+    Serial.print("ntp.precision = ");
+    Serial.println(read_uint8(NTP_PRECISION_P));
+    Serial.print("ntp.root_delay = ");
+    Serial.println(read_uint32(NTP_ROOT_DELAY_P));
+    Serial.print("ntp.root_dispersion = ");
+    Serial.println(read_uint32(NTP_ROOT_DISPERSION_P));
+    ether.printIp("ntp.reference_id = ", &gPB[NTP_REFERENCE_ID_P]);
+}
+
+////////////////////////////////////////////////////////////////////////
+// Ethernet
+
+// MAC address must be unique on the LAN.
+static uint8_t mac_address[] = { 0x74,0x69,0x69,0x2D,0x30,0x32 };
+static uint8_t ip_address[] = { 1,1,1,100 };
+
+#define ETHERNET_BUFFER_SIZE 550
+uint8_t Ethernet::buffer[ETHERNET_BUFFER_SIZE];
+
+#define ETHERNET_CS_PIN 10
+
+static void ethernet_setup()
+{
+    if (!ether.begin(ETHERNET_BUFFER_SIZE, mac_address, ETHERNET_CS_PIN))
+        Serial.println("Failed to access Ethernet controller");
+
+    ether.staticSetup(ip_address);
+}
+
+static void ethernet_loop()
+{
+    word len = ether.packetReceive();
+
+    if (packet_is_udp(len))
+    {
+        ntp_loop();
+    }
+    else
+    {
+        word pos = ether.packetLoop(len);
+
+        // If we received a TCP packet then 'pos' is the index
+        // where the packet's data is stored in 'ether.buffer'.
+        if (pos != 0)
+        {
+            // Assume that it's an HTTP request.
+            http_loop(pos);
+        }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -298,7 +424,7 @@ void loop()
 {
     pps_loop();
     gps_loop();
-    http_loop();
+    ethernet_loop();
 }
 
 // vim: ft=arduino
