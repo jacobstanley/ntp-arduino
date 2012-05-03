@@ -43,3 +43,7 @@ end
 task :tags => 'libtags' do
   sh 'ctags -f tags --tag-relative --extra=+fq -R ./src/'
 end
+
+task :fix_baud do
+  sh 'stty -F /dev/ttyUSB0 57600'
+end
