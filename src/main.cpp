@@ -210,7 +210,10 @@ static void write_status_page(BufferFiller &response)
 // NOTE: the response.
 static word process_http_request(const char *request, BufferFiller &response)
 {
-    //Serial.println(request);
+    //size_t r = strchr(request, '\r') - request;
+    //Serial.write((const uint8_t*)request, r);
+    //Serial.println();
+
     write_status_page(response);
 }
 
@@ -441,7 +444,7 @@ const uint8_t ntp_header[] PROGMEM = {
     'G','P','S',0, // Reference ID - we are using a GPS receiver
 };
 
-static void ntp_loop()
+static void ntp_loop(uint32_t rxtime)
 {
     if (!udp_dst_port_is(NTP_PORT)) return;
 
@@ -450,7 +453,7 @@ static void ntp_loop()
     if (len < UDP_HEADER_LEN + NTP_DATA_LEN) return;
 
     timestamp_t time1 = read_timestamp(NTP_TIME3_P);
-    timestamp_t time2 = last_receive_time();
+    timestamp_t time2 = micros_to_timestamp(rxtime);
 
     memcpy_P(g_packet + NTP_DATA_P, ntp_header, sizeof ntp_header);
 
@@ -502,21 +505,42 @@ static void ethernet_setup()
 
 static void ethernet_loop()
 {
-    word len = ether.packetReceive();
+    bool rxtime_valid = true;
 
-    if (packet_is_udp(len))
+    for (;;)
     {
-        ntp_loop();
-    }
+        uint8_t pktcnt = ether.packetCount();
 
-    word pos = ether.packetLoop(len);
+        if (pktcnt == 0)
+        {
+            // all packets processed, do
+            // housekeeping then return
+            ether.packetLoop(0);
+            return;
+        }
 
-    // If we received a TCP packet then 'pos' is the index
-    // where the packet's data is stored in 'ether.buffer'.
-    if (pos != 0)
-    {
-        // Assume that it's an HTTP request.
-        http_loop(pos);
+        uint32_t rxtime = g_receive_time;
+        uint16_t len = ether.packetReceive();
+
+        if (rxtime_valid && packet_is_udp(len))
+        {
+            ntp_loop(rxtime);
+        }
+
+        uint16_t pos = ether.packetLoop(len);
+
+        // If we received a TCP packet then 'pos' is the index
+        // where the packet's data is stored in 'ether.buffer'.
+        if (pos != 0)
+        {
+            // Assume that it's an HTTP request.
+            http_loop(pos);
+        }
+
+        // The packet received interrupt only fires once per group
+        // of packets, so the time is only valid for the first packet
+        // after the 'pktcnt' is reset to zero.
+        rxtime_valid = false;
     }
 }
 
