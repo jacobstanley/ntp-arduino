@@ -84,18 +84,18 @@ static void gps_setup()
 #define PPS_PIN 3
 #define PPS_INT 1
 
-static volatile uint32_t g_time_pps;
+static volatile uint32_t g_pps_time;
 static volatile bool g_waiting_for_fix;
 
 static void pps_interrupt()
 {
-    g_time_pps = micros();
+    g_pps_time = micros();
     g_waiting_for_fix = true;
 }
 
 static void pps_setup()
 {
-    g_time_pps = micros();
+    g_pps_time = micros();
 
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
@@ -107,7 +107,7 @@ static void pps_setup()
 
 static void pps_loop()
 {
-    uint32_t pps_state = micros() - g_time_pps < 100000 ? HIGH : LOW;
+    uint32_t pps_state = micros() - g_pps_time < 100000 ? HIGH : LOW;
     digitalWrite(LED_PIN, pps_state);
 }
 
@@ -200,7 +200,7 @@ static void write_status_page(BufferFiller &response)
     response.emit_p(PSTR("Free mem $D\n"),
         get_free_memory() );
 
-    uint32_t time_since_pps = micros() - g_time_pps;
+    uint32_t time_since_pps = micros() - g_pps_time;
     response.emit_p(PSTR("Since PPS $S\n"),
         print_ms_time(time_since_pps/1000, buffer));
 }
@@ -378,9 +378,9 @@ static timestamp_t last_fix_time()
         hour, minute, second, hundredths);
 }
 
-static timestamp_t now()
+static timestamp_t micros_to_timestamp(uint32_t micros)
 {
-    uint64_t us_since_pps = micros() - g_time_pps;
+    uint64_t us_since_pps = micros - g_pps_time;
     uint64_t frac_since_pps = (NTP_FRAC_MAX * us_since_pps) / 1000000;
 
     timestamp_t time = last_fix_time();
@@ -402,6 +402,18 @@ static timestamp_t now()
     time.frac += frac;
 
     return time;
+}
+
+static volatile uint32_t g_receive_time;
+
+static timestamp_t last_receive_time()
+{
+    return micros_to_timestamp(g_receive_time);
+}
+
+static timestamp_t current_time()
+{
+    return micros_to_timestamp(micros());
 }
 
 static timestamp_t read_timestamp(off_t offset)
@@ -431,20 +443,14 @@ const uint8_t ntp_header[] PROGMEM = {
 
 static void ntp_loop()
 {
-    timestamp_t time2 = now();
-
     if (!udp_dst_port_is(NTP_PORT)) return;
 
     uint16_t len = read_uint16(UDP_LEN_H_P);
 
     if (len < UDP_HEADER_LEN + NTP_DATA_LEN) return;
 
-    uint8_t *src_ip   = &g_packet[IP_SRC_P];
-    uint16_t src_port = read_uint16(UDP_SRC_PORT_H_P);
     timestamp_t time1 = read_timestamp(NTP_TIME3_P);
-
-    Serial.print(F("Replying to NTP request from "));
-    ether.printIp("", src_ip);
+    timestamp_t time2 = last_receive_time();
 
     memcpy_P(g_packet + NTP_DATA_P, ntp_header, sizeof ntp_header);
 
@@ -454,11 +460,15 @@ static void ntp_loop()
     write_timestamp(NTP_TIME1_P, time1);
     write_timestamp(NTP_TIME2_P, time2);
 
-    timestamp_t time3 = now();
+    timestamp_t time3 = current_time();
     write_timestamp(NTP_TIME3_P, time3);
 
     ether.makeUdpReply(
         (char *)(g_packet + NTP_DATA_P), NTP_DATA_LEN, NTP_PORT);
+
+    Serial.print(F("NTP request from "));
+    uint8_t *dst_ip = &g_packet[IP_DST_P];
+    ether.printIp("", dst_ip);
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -473,12 +483,21 @@ uint8_t Ethernet::buffer[ETHERNET_BUFFER_SIZE];
 
 #define ETHERNET_CS_PIN 10
 
+#define ETHERNET_INT 0 // Pin 2 (on ATmega 168 and 328)
+
+static void packet_received_interrupt()
+{
+    g_receive_time = micros();
+}
+
 static void ethernet_setup()
 {
     if (!ether.begin(ETHERNET_BUFFER_SIZE, mac_address, ETHERNET_CS_PIN))
         Serial.println(F("Failed to access Ethernet controller"));
 
     ether.staticSetup(ip_address);
+
+    attachInterrupt(ETHERNET_INT, packet_received_interrupt, FALLING);
 }
 
 static void ethernet_loop()
